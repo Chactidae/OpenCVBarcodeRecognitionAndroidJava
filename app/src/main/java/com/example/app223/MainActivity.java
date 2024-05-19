@@ -1,7 +1,14 @@
 package com.example.app223;
 
+import static org.opencv.android.NativeCameraView.TAG;
+
+import android.app.ActionBar;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.SurfaceHolder;
@@ -9,12 +16,20 @@ import android.view.SurfaceView;
 import android.view.WindowManager;
 import android.widget.Button;
 
-import androidx.activity.EdgeToEdge;
-import androidx.annotation.NonNull;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.graphics.Insets;
-import androidx.core.view.ViewCompat;
-import androidx.core.view.WindowInsetsCompat;
+import org.opencv.core.*;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.*;
+
+import org.opencv.imgcodecs.Imgcodecs;
+import org.opencv.imgproc.Imgproc;
+
+
+import org.opencv.dnn.Dnn;
+import org.opencv.dnn.Net;
+import org.opencv.videoio.VideoCapture;
+
 
 import org.opencv.android.CameraActivity;
 import org.opencv.android.CameraBridgeViewBase;
@@ -50,7 +65,9 @@ public class MainActivity extends CameraActivity {
     private VideoCapture cameraSource;
 
     Button btn_scan;
-
+    Yolov5TFLiteDetector yolov5TFLiteDetector;
+    Paint boxPaint = new Paint();
+    Paint textPain = new Paint();
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -59,6 +76,18 @@ public class MainActivity extends CameraActivity {
         OpenCVLoader.initLocal();
         cameraBridgeViewBase = findViewById(R.id.camera_view);
         bareCodeDetector = new QRCodeDetector();
+        yolov5TFLiteDetector = new Yolov5TFLiteDetector();
+        yolov5TFLiteDetector.setModelFile("yolov5s-fp16.tflite");
+
+        yolov5TFLiteDetector.initialModel(this);
+
+        boxPaint.setStrokeWidth(5);
+        boxPaint.setStyle(Paint.Style.STROKE);
+        boxPaint.setColor(Color.RED);
+
+        textPain.setTextSize(50);
+        textPain.setColor(Color.GREEN);
+        textPain.setStyle(Paint.Style.FILL);
         cameraBridgeViewBase.setVisibility(SurfaceView.VISIBLE);
         cameraBridgeViewBase.setCvCameraViewListener(new CvCameraViewListener2() {
             @Override
@@ -78,53 +107,40 @@ public class MainActivity extends CameraActivity {
                 // Остановка камеры
                 cameraSource.release();
             }
-
             @Override
             public Mat onCameraFrame(CvCameraViewFrame inputFrame) {
                 Mat frame = inputFrame.rgba();
-                Mat gray = new Mat();
-                Mat gradX = new Mat();
-                Mat gradY = new Mat();
-                Mat gradient = new Mat();
-                Mat blurred = new Mat();
-                Mat thresh = new Mat();
-                Mat closed = new Mat();
-                MatOfRect qrCodes = new MatOfRect();
+                // ... (Ваш код для обработки кадра, например, изменение размера)
+                try {
+                    // Преобразуем Mat в Bitmap
+                    Bitmap bitmap = Bitmap.createBitmap(frame.width(), frame.height(), Bitmap.Config.ARGB_8888);
+                    Utils.matToBitmap(frame, bitmap);
 
-                // Преобразование в оттенки серого
-                Imgproc.cvtColor(frame, gray, Imgproc.COLOR_RGBA2GRAY);
-                // Рассчитываем градиенты по X и Y
-                Imgproc.Sobel(gray, gradX, CvType.CV_32F, 1, 0, -1);
-                Imgproc.Sobel(gray, gradY, CvType.CV_32F, 0, 1, -1);
-                Core.subtract(gradX, gradY, gradient);
-                Core.convertScaleAbs(gradient, gradient);
+                    // Выполняем детектирование с помощью YOLOv5
+                    ArrayList<Recognition> recognitions = yolov5TFLiteDetector.detect(bitmap);
 
-                // Размытие
-                Imgproc.blur(gradient, blurred, new Size(9, 9));
+                    // Рисуем прямоугольники и метки на Bitmap
+                    Bitmap mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true);
+                    Canvas canvas = new Canvas(mutableBitmap);
 
-                // Бинаризация
-                Imgproc.threshold(blurred, thresh, 200, 255, Imgproc.THRESH_BINARY);
+                    for (Recognition recognition : recognitions) {
+                        if (recognition.getConfidence() > 0.4) {
+                            RectF location = recognition.getLocation();
+                            canvas.drawRect(location, boxPaint);
+                            canvas.drawText(recognition.getLabelName() + ":" + recognition.getConfidence(), location.left, location.top, textPain);
+                        }
+                    }
 
-                // Закрытие
-                Mat kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(21, 7));
-                Imgproc.morphologyEx(thresh, closed, Imgproc.MORPH_CLOSE, kernel);
-                // Распознавание QR-кодов
-                bareCodeDetector.detectMulti(thresh, qrCodes);
+                    // Преобразуем Bitmap обратно в Mat
+                    Mat newFrame = new Mat();
+                    Utils.bitmapToMat(mutableBitmap, newFrame);
 
-                // Поиск контуров на бинаризированном изображении
-                List<MatOfPoint> contours = new ArrayList<>();
-                Imgproc.findContours(thresh, contours, new Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
+                    return newFrame;
 
-                // Сортировка контуров по площади в порядке убывания
-                contours.sort((c1, c2) -> Double.compare(Imgproc.contourArea(c2), Imgproc.contourArea(c1)));
-
-                // Отрисовка самого большого контура (предполагая, что это QR-код)
-                if (!contours.isEmpty()) {
-                    MatOfPoint largestContour = contours.get(0);
-                    Imgproc.drawContours(frame, Collections.singletonList(largestContour), -1, new Scalar(0, 255, 0), 2);
+                } catch (Exception e) {
+                    Log.e(TAG, "Error processing frame: " + e.getMessage());
+                    return frame; // Возвращаем исходную матрицу в случае ошибки
                 }
-
-                return frame;
 
             }
         });
@@ -134,4 +150,5 @@ public class MainActivity extends CameraActivity {
     protected List<?extends CameraBridgeViewBase> getCameraViewList(){
         return Collections.singletonList(cameraBridgeViewBase);
     }
+
 }
